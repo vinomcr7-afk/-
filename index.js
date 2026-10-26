@@ -4,18 +4,14 @@ const {
   Partials,
   EmbedBuilder,
   Events,
-  AuditLogEvent,
+  ChannelType
 } = require("discord.js");
 
 const TOKEN = process.env.DISCORD_TOKEN;
-const LOG_CHANNEL_ID = process.env.LOG_CHANNEL_ID;
+const CATEGORY_NAME = "PW VENOM LOGS";
 
 if (!TOKEN) {
-  console.error("Missing DISCORD_TOKEN environment variable.");
-  process.exit(1);
-}
-if (!LOG_CHANNEL_ID) {
-  console.error("Missing LOG_CHANNEL_ID environment variable.");
+  console.error("Missing DISCORD_TOKEN!");
   process.exit(1);
 }
 
@@ -26,136 +22,349 @@ const client = new Client({
     GatewayIntentBits.GuildMessages,
     GatewayIntentBits.MessageContent,
     GatewayIntentBits.GuildVoiceStates,
-    GatewayIntentBits.GuildModeration,
+    GatewayIntentBits.GuildModeration
   ],
-  partials: [Partials.Message, Partials.Channel, Partials.GuildMember],
+  partials: [
+    Partials.Message,
+    Partials.Channel,
+    Partials.GuildMember
+  ]
 });
 
-async function sendLog(guild, embed) {
-  try {
-    const channel = await client.channels.fetch(LOG_CHANNEL_ID);
-    if (!channel || !channel.isTextBased() || !channel.send) {
-      console.error("LOG_CHANNEL_ID must be a text channel the bot can access.");
-      return;
-    }
-    if (channel.guildId && channel.guildId !== guild.id) {
-      console.error("The configured log channel is not in the event's server.");
-      return;
-    }
-    await channel.send({ embeds: [embed] });
-  } catch (error) {
-    console.error("Could not send log:", error.message);
-  }
-}
+const LOGS = {
+  messages: "message-logs",
+  members: "member-logs",
+  voice: "voice-logs",
+  moderation: "moderation-logs",
+  roles: "role-logs",
+  channels: "channel-logs",
+  nicknames: "nickname-logs"
+};
 
 function makeEmbed(title, description, color = 0x5865f2) {
   return new EmbedBuilder()
     .setColor(color)
     .setTitle(title)
-    .setDescription(description || "No additional details.")
+    .setDescription(description.slice(0, 4000))
     .setTimestamp()
-    .setFooter({ text: "PW VENOM LOGS" });
+    .setFooter({ text: "PW VENOM LOGS 🕷️" });
 }
 
-client.once(Events.ClientReady, (readyClient) => {
-  console.log(`PW VENOM LOGS online as ${readyClient.user.tag}`);
-});
+async function setupLogs(guild) {
+  try {
+    let category = guild.channels.cache.find(
+      c => c.type === ChannelType.GuildCategory &&
+      c.name === CATEGORY_NAME
+    );
 
-client.on(Events.MessageDelete, async (message) => {
-  if (!message.guild || message.author?.bot) return;
-  const author = message.author ? `${message.author.tag} (${message.author.id})` : "Unknown / unavailable";
-  const content = message.content?.trim() || "[Message content unavailable]";
-  await sendLog(message.guild, makeEmbed(
-    "🗑️ Message Deleted",
-    `**Author:** ${author}\n**Channel:** <#${message.channelId}>\n**Content:** ${content.slice(0, 3000)}`,
-    0xed4245
-  ));
-});
+    if (!category) {
+      category = await guild.channels.create({
+        name: CATEGORY_NAME,
+        type: ChannelType.GuildCategory
+      });
+    }
 
-client.on(Events.MessageUpdate, async (oldMessage, newMessage) => {
-  if (!newMessage.guild || newMessage.author?.bot) return;
-  if (oldMessage.partial) {
-    try { await oldMessage.fetch(); } catch { /* old content may be unavailable */ }
+    for (const name of Object.values(LOGS)) {
+      let channel = guild.channels.cache.find(
+        c => c.type === ChannelType.GuildText &&
+        c.name === name
+      );
+
+      if (!channel) {
+        await guild.channels.create({
+          name,
+          type: ChannelType.GuildText,
+          parent: category.id
+        });
+      } else if (channel.parentId !== category.id) {
+        await channel.setParent(category.id);
+      }
+    }
+
+    console.log("PW VENOM LOGS channels ready!");
+  } catch (error) {
+    console.error("Channel setup error:", error.message);
   }
-  const before = oldMessage.content?.trim() || "[Old content unavailable]";
-  const after = newMessage.content?.trim() || "[New content unavailable]";
+}
+
+async function sendLog(guild, type, embed) {
+  try {
+    let channel = guild.channels.cache.find(
+      c => c.type === ChannelType.GuildText &&
+      c.name === LOGS[type]
+    );
+
+    if (!channel) {
+      await setupLogs(guild);
+
+      channel = guild.channels.cache.find(
+        c => c.type === ChannelType.GuildText &&
+        c.name === LOGS[type]
+      );
+    }
+
+    if (channel) {
+      await channel.send({ embeds: [embed] });
+    }
+  } catch (error) {
+    console.error("Log error:", error.message);
+  }
+}
+
+client.once(Events.ClientReady, async ready => {
+  console.log(`PW VENOM LOGS online as ${ready.user.tag}`);
+
+  for (const guild of ready.guilds.cache.values()) {
+    await setupLogs(guild);
+  }
+});
+
+client.on(Events.GuildCreate, async guild => {
+  await setupLogs(guild);
+});
+
+// MESSAGE LOGS
+client.on(Events.MessageDelete, async message => {
+  if (!message.guild || message.author?.bot) return;
+
+  await sendLog(
+    message.guild,
+    "messages",
+    makeEmbed(
+      "🗑️ Message Deleted",
+      `Author: ${message.author?.tag || "Unknown"}\n` +
+      `Channel: <#${message.channelId}>\n` +
+      `Content: ${message.content || "Content unavailable"}`,
+      0xed4245
+    )
+  );
+});
+
+client.on(Events.MessageUpdate, async (oldMsg, newMsg) => {
+  if (!newMsg.guild || newMsg.author?.bot) return;
+
+  if (oldMsg.partial) {
+    try {
+      await oldMsg.fetch();
+    } catch {}
+  }
+
+  const before = oldMsg.content || "Unavailable";
+  const after = newMsg.content || "Unavailable";
+
   if (before === after) return;
-  await sendLog(newMessage.guild, makeEmbed(
-    "✏️ Message Edited",
-    `**Author:** ${newMessage.author?.tag || "Unknown"}\n**Channel:** <#${newMessage.channelId}>\n**Before:** ${before.slice(0, 1400)}\n**After:** ${after.slice(0, 1400)}\n[Jump to message](${newMessage.url})`,
-    0xfee75c
-  ));
+
+  await sendLog(
+    newMsg.guild,
+    "messages",
+    makeEmbed(
+      "✏️ Message Edited",
+      `Author: ${newMsg.author?.tag || "Unknown"}\n` +
+      `Channel: <#${newMsg.channelId}>\n` +
+      `Before: ${before.slice(0, 1200)}\n` +
+      `After: ${after.slice(0, 1200)}`,
+      0xfee75c
+    )
+  );
 });
 
-client.on(Events.GuildMemberAdd, async (member) => {
-  await sendLog(member.guild, makeEmbed(
-    "📥 Member Joined",
-    `**Member:** ${member.user.tag} (${member.id})\n**Account created:** <t:${Math.floor(member.user.createdTimestamp / 1000)}:R>`,
-    0x57f287
-  ));
+// MEMBER LOGS
+client.on(Events.GuildMemberAdd, async member => {
+  await sendLog(
+    member.guild,
+    "members",
+    makeEmbed(
+      "📥 Member Joined",
+      `Member: ${member.user.tag}\nID: ${member.id}`,
+      0x57f287
+    )
+  );
 });
 
-client.on(Events.GuildMemberRemove, async (member) => {
-  const tag = member.user?.tag || "Unknown member";
-  await sendLog(member.guild, makeEmbed(
-    "📤 Member Left",
-    `**Member:** ${tag} (${member.id})`,
-    0xed4245
-  ));
+client.on(Events.GuildMemberRemove, async member => {
+  await sendLog(
+    member.guild,
+    "members",
+    makeEmbed(
+      "📤 Member Left",
+      `Member: ${member.user?.tag || "Unknown"}\nID: ${member.id}`,
+      0xed4245
+    )
+  );
 });
 
+// VOICE LOGS
 client.on(Events.VoiceStateUpdate, async (oldState, newState) => {
   const member = newState.member || oldState.member;
+
   if (!member || member.user.bot) return;
 
-  let action;
-  let details;
+  let title;
+  let description;
+
   if (!oldState.channelId && newState.channelId) {
-    action = "🎙️ Joined Voice Channel";
-    details = `**Member:** ${member.user.tag}\n**Channel:** <#${newState.channelId}>`;
+    title = "🎙️ Voice Joined";
+    description = `${member.user.tag} joined <#${newState.channelId}>`;
   } else if (oldState.channelId && !newState.channelId) {
-    action = "🔇 Left Voice Channel";
-    details = `**Member:** ${member.user.tag}\n**Channel:** <#${oldState.channelId}>`;
+    title = "🔇 Voice Left";
+    description = `${member.user.tag} left <#${oldState.channelId}>`;
   } else if (oldState.channelId !== newState.channelId) {
-    action = "🔀 Voice Channel Changed";
-    details = `**Member:** ${member.user.tag}\n**From:** <#${oldState.channelId}>\n**To:** <#${newState.channelId}>`;
+    title = "🔀 Voice Changed";
+    description =
+      `${member.user.tag}\n` +
+      `From: <#${oldState.channelId}>\n` +
+      `To: <#${newState.channelId}>`;
   } else {
     return;
   }
-  await sendLog(newState.guild, makeEmbed(action, details, 0x5865f2));
+
+  await sendLog(
+    newState.guild,
+    "voice",
+    makeEmbed(title, description)
+  );
 });
 
-client.on(Events.GuildRoleCreate, async (role) => {
-  await sendLog(role.guild, makeEmbed("🆕 Role Created", `**Role:** ${role.name}\n**ID:** ${role.id}`, 0x57f287));
+// BAN LOGS
+client.on(Events.GuildBanAdd, async ban => {
+  await sendLog(
+    ban.guild,
+    "moderation",
+    makeEmbed(
+      "🔨 Member Banned",
+      `User: ${ban.user.tag}\nID: ${ban.user.id}`,
+      0xed4245
+    )
+  );
 });
-client.on(Events.GuildRoleDelete, async (role) => {
-  await sendLog(role.guild, makeEmbed("🗑️ Role Deleted", `**Role:** ${role.name}\n**ID:** ${role.id}`, 0xed4245));
+
+client.on(Events.GuildBanRemove, async ban => {
+  await sendLog(
+    ban.guild,
+    "moderation",
+    makeEmbed(
+      "♻️ Member Unbanned",
+      `User: ${ban.user.tag}\nID: ${ban.user.id}`,
+      0x57f287
+    )
+  );
 });
+
+// ROLE LOGS
+client.on(Events.GuildRoleCreate, async role => {
+  await sendLog(
+    role.guild,
+    "roles",
+    makeEmbed("🆕 Role Created", `Role: ${role.name}\nID: ${role.id}`)
+  );
+});
+
+client.on(Events.GuildRoleDelete, async role => {
+  await sendLog(
+    role.guild,
+    "roles",
+    makeEmbed("🗑️ Role Deleted", `Role: ${role.name}\nID: ${role.id}`)
+  );
+});
+
 client.on(Events.GuildRoleUpdate, async (oldRole, newRole) => {
-  await sendLog(newRole.guild, makeEmbed("✏️ Role Updated", `**Role:** ${newRole.name}\n**ID:** ${newRole.id}`, 0xfee75c));
+  await sendLog(
+    newRole.guild,
+    "roles",
+    makeEmbed(
+      "✏️ Role Updated",
+      `Before: ${oldRole.name}\nAfter: ${newRole.name}`
+    )
+  );
 });
 
-client.on(Events.ChannelCreate, async (channel) => {
-  if (!channel.guild) return;
-  await sendLog(channel.guild, makeEmbed("🆕 Channel Created", `**Channel:** ${channel.name}\n**ID:** ${channel.id}`, 0x57f287));
+// CHANNEL LOGS
+client.on(Events.ChannelCreate, async channel => {
+  if (!channel.guild || channel.parent?.name === CATEGORY_NAME) return;
+
+  await sendLog(
+    channel.guild,
+    "channels",
+    makeEmbed("🆕 Channel Created", `Channel: ${channel.name}`)
+  );
 });
-client.on(Events.ChannelDelete, async (channel) => {
-  if (!channel.guild) return;
-  await sendLog(channel.guild, makeEmbed("🗑️ Channel Deleted", `**Channel:** ${channel.name}\n**ID:** ${channel.id}`, 0xed4245));
+
+client.on(Events.ChannelDelete, async channel => {
+  if (!channel.guild || channel.parent?.name === CATEGORY_NAME) return;
+
+  await sendLog(
+    channel.guild,
+    "channels",
+    makeEmbed("🗑️ Channel Deleted", `Channel: ${channel.name}`)
+  );
 });
+
 client.on(Events.ChannelUpdate, async (oldChannel, newChannel) => {
-  if (!newChannel.guild) return;
-  await sendLog(newChannel.guild, makeEmbed("✏️ Channel Updated", `**Channel:** ${newChannel.name}\n**ID:** ${newChannel.id}`, 0xfee75c));
+  if (!newChannel.guild || newChannel.parent?.name === CATEGORY_NAME) return;
+
+  await sendLog(
+    newChannel.guild,
+    "channels",
+    makeEmbed(
+      "✏️ Channel Updated",
+      `Before: ${oldChannel.name}\nAfter: ${newChannel.name}`
+    )
+  );
 });
 
-client.on(Events.GuildBanAdd, async (ban) => {
-  await sendLog(ban.guild, makeEmbed("🔨 Member Banned", `**User:** ${ban.user.tag} (${ban.user.id})`, 0xed4245));
-});
-client.on(Events.GuildBanRemove, async (ban) => {
-  await sendLog(ban.guild, makeEmbed("♻️ Member Unbanned", `**User:** ${ban.user.tag} (${ban.user.id})`, 0x57f287));
+// NICKNAME AND MEMBER ROLE LOGS
+client.on(Events.GuildMemberUpdate, async (oldMember, newMember) => {
+  if (oldMember.nickname !== newMember.nickname) {
+    await sendLog(
+      newMember.guild,
+      "nicknames",
+      makeEmbed(
+        "📝 Nickname Changed",
+        `Member: ${newMember.user.tag}\n` +
+        `Before: ${oldMember.nickname || oldMember.user.username}\n` +
+        `After: ${newMember.nickname || newMember.user.username}`
+      )
+    );
+  }
+
+  const oldRoles = new Set(oldMember.roles.cache.keys());
+  const newRoles = new Set(newMember.roles.cache.keys());
+
+  const added = [...newRoles].filter(id => !oldRoles.has(id));
+  const removed = [...oldRoles].filter(id => !newRoles.has(id));
+
+  if (added.length || removed.length) {
+    const changes = [];
+
+    if (added.length) {
+      changes.push(
+        `Added: ${added.map(id => `<@&${id}>`).join(", ")}`
+      );
+    }
+
+    if (removed.length) {
+      changes.push(
+        `Removed: ${removed.map(id => `<@&${id}>`).join(", ")}`
+      );
+    }
+
+    await sendLog(
+      newMember.guild,
+      "roles",
+      makeEmbed(
+        "👤 Member Roles Updated",
+        `Member: ${newMember.user.tag}\n${changes.join("\n")}`
+      )
+    );
+  }
 });
 
-client.on(Events.Error, (error) => console.error("Discord client error:", error));
-process.on("unhandledRejection", (error) => console.error("Unhandled rejection:", error));
+client.on(Events.Error, error => {
+  console.error("Discord error:", error.message);
+});
+
+process.on("unhandledRejection", error => {
+  console.error("Unhandled error:", error);
+});
 
 client.login(TOKEN);
