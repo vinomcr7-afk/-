@@ -17,109 +17,85 @@ const {
   ButtonStyle
 } = require("discord.js");
 
-const {
-  joinVoiceChannel,
-  getVoiceConnection,
-  VoiceConnectionStatus,
-  entersState
-} = require("@discordjs/voice");
-
-const express = require("express");
 const fs = require("fs");
 const path = require("path");
 
-// ================= CONFIG =================
+// =============== CONFIG ===============
 
 const TOKEN = process.env.DISCORD_TOKEN;
 const CLIENT_ID = process.env.DISCORD_CLIENT_ID;
-const VOICE_CHANNEL_ID = process.env.VOICE_CHANNEL_ID || "";
-const BOT_CONTROL_SECRET = process.env.BOT_CONTROL_SECRET;
 
 if (!TOKEN || !CLIENT_ID) {
   throw new Error("Missing DISCORD_TOKEN or DISCORD_CLIENT_ID in Railway Variables");
 }
 
-const app = express();
-app.use(express.json({ limit: "100kb" }));
-
 const CONFIG_FILE = path.join(__dirname, "logs-config.json");
 
-function readConfig() {
+function loadConfig() {
   try {
-    if (!fs.existsSync(CONFIG_FILE)) return {};
     return JSON.parse(fs.readFileSync(CONFIG_FILE, "utf8"));
-  } catch (error) {
-    console.error("Config read error:", error);
+  } catch {
     return {};
   }
 }
 
-function saveConfig(config) {
-  fs.writeFileSync(CONFIG_FILE, JSON.stringify(config, null, 2));
+let configs = loadConfig();
+
+function saveConfig() {
+  fs.writeFileSync(CONFIG_FILE, JSON.stringify(configs, null, 2));
 }
 
-let config = readConfig();
+function getConfig(guildId) {
+  if (!configs[guildId]) configs[guildId] = {};
+  return configs[guildId];
+}
 
-// ================= LOG CATEGORIES =================
+// =============== LOG TYPES ===============
 
-const CATEGORIES = {
-  messages: {
-    label: "🗑️・رسائل محذوفة ومعدلة",
-    description: "Deleted and edited messages"
+const LOG_TYPES = {
+  deleted: {
+    label: "🗑️・Deleted Messages",
+    description: "Deleted messages"
   },
-  members: {
-    label: "📥・دخول وخروج الأعضاء",
-    description: "Member join and leave"
+  edited: {
+    label: "✏️・Edited Messages",
+    description: "Edited messages"
   },
-  voice: {
-    label: "🎙️・دخول وخروج الفويس",
-    description: "Voice join, leave and move"
+  memberJoin: {
+    label: "📥・Member Join",
+    description: "Members joining"
   },
-  roles: {
-    label: "🎭・إعطاء وإزالة الرتب",
-    description: "Member role changes"
+  memberLeave: {
+    label: "📤・Member Leave",
+    description: "Members leaving"
   },
-  roleCreate: {
-    label: "🆕・إضافة رول",
-    description: "New role created"
+  voiceJoin: {
+    label: "🎙️・Voice Join",
+    description: "Members joining voice"
   },
-  channelCreate: {
-    label: "🟢・إضافة روم",
+  voiceLeave: {
+    label: "🔇・Voice Leave",
+    description: "Members leaving voice"
+  },
+  roleAdded: {
+    label: "🎭・Role Added",
+    description: "Role assigned to member"
+  },
+  roleRemoved: {
+    label: "➖・Role Removed",
+    description: "Role removed from member"
+  },
+  channelCreated: {
+    label: "🟢・Channel Created",
     description: "New channel created"
   },
-  channelDelete: {
-    label: "🔴・إزالة روم",
+  channelDeleted: {
+    label: "🔴・Channel Deleted",
     description: "Channel deleted"
   }
 };
 
-function getGuildConfig(guildId) {
-  if (!config[guildId]) config[guildId] = {};
-  return config[guildId];
-}
-
-async function sendLog(guild, category, title, description) {
-  try {
-    const channelId = config[guild.id]?.[category];
-    if (!channelId) return;
-
-    const channel = await guild.channels.fetch(channelId).catch(() => null);
-    if (!channel || !channel.isTextBased() || !channel.send) return;
-
-    const embed = new EmbedBuilder()
-      .setColor(0x171717)
-      .setTitle(title)
-      .setDescription(String(description || "No details").slice(0, 4000))
-      .setFooter({ text: "VENOM LOG" })
-      .setTimestamp();
-
-    await channel.send({ embeds: [embed] });
-  } catch (error) {
-    console.error(`Log error [${category}]:`, error.message);
-  }
-}
-
-// ================= DISCORD CLIENT =================
+// =============== CLIENT ===============
 
 const client = new Client({
   intents: [
@@ -127,8 +103,7 @@ const client = new Client({
     GatewayIntentBits.GuildMembers,
     GatewayIntentBits.GuildMessages,
     GatewayIntentBits.MessageContent,
-    GatewayIntentBits.GuildVoiceStates,
-    GatewayIntentBits.GuildModeration
+    GatewayIntentBits.GuildVoiceStates
   ],
   partials: [
     Partials.Message,
@@ -137,11 +112,38 @@ const client = new Client({
   ]
 });
 
-// ================= SETUP COMMAND =================
+// =============== SEND LOG ===============
 
-const setupCommand = new SlashCommandBuilder()
+async function sendLog(guild, type, title, description) {
+  try {
+    const entry = configs[guild.id]?.[type];
+
+    if (!entry?.enabled || !entry?.channelId) return;
+
+    const channel = await guild.channels
+      .fetch(entry.channelId)
+      .catch(() => null);
+
+    if (!channel || !channel.isTextBased() || !channel.send) return;
+
+    const embed = new EmbedBuilder()
+      .setColor(0x171717)
+      .setTitle(title)
+      .setDescription(String(description).slice(0, 4000))
+      .setFooter({ text: "VENOM LOG" })
+      .setTimestamp();
+
+    await channel.send({ embeds: [embed] });
+  } catch (error) {
+    console.error(`Log error (${type}):`, error.message);
+  }
+}
+
+// =============== SLASH COMMAND ===============
+
+const command = new SlashCommandBuilder()
   .setName("setup-logs")
-  .setDescription("Configure VENOM LOG for this server")
+  .setDescription("Configure VENOM LOG")
   .setDefaultMemberPermissions(PermissionFlagsBits.ManageGuild);
 
 const rest = new REST({ version: "10" }).setToken(TOKEN);
@@ -152,55 +154,26 @@ client.once(Events.ClientReady, async (readyClient) => {
   try {
     await rest.put(
       Routes.applicationCommands(CLIENT_ID),
-      { body: [setupCommand.toJSON()] }
+      { body: [command.toJSON()] }
     );
-    console.log("Global /setup-logs command registered");
+    console.log("Global /setup-logs registered");
   } catch (error) {
-    console.error("Slash command registration failed:", error);
-  }
-
-  // Optional voice auto-join
-  if (VOICE_CHANNEL_ID) {
-    try {
-      const channel = await readyClient.channels.fetch(VOICE_CHANNEL_ID);
-
-      if (!channel || !channel.isVoiceBased() || !channel.guild) {
-        console.error("VOICE_CHANNEL_ID is not a valid voice channel");
-        return;
-      }
-
-      const connection = joinVoiceChannel({
-        channelId: channel.id,
-        guildId: channel.guild.id,
-        adapterCreator: channel.guild.voiceAdapterCreator,
-        selfDeaf: true,
-        selfMute: true
-      });
-
-      connection.on(VoiceConnectionStatus.Disconnected, () => {
-        console.log("Voice connection disconnected");
-      });
-
-      await entersState(connection, VoiceConnectionStatus.Ready, 30_000);
-      console.log(`Connected to voice: ${channel.name}`);
-    } catch (error) {
-      console.error("Voice join failed:", error.message);
-    }
+    console.error("Command registration error:", error);
   }
 });
 
-// ================= SETUP INTERACTIONS =================
+// =============== SETUP MENU ===============
 
-const pendingSetup = new Map();
+const sessions = new Map();
 
-function categoryMenu() {
+function makeCategoryMenu() {
   const menu = new StringSelectMenuBuilder()
-    .setCustomId("venom_category")
-    .setPlaceholder("Choose a log category")
+    .setCustomId("venom_categories")
+    .setPlaceholder("Select a log type")
     .addOptions(
-      Object.entries(CATEGORIES).map(([value, category]) => ({
-        label: category.label.slice(0, 100),
-        description: category.description,
+      Object.entries(LOG_TYPES).map(([value, item]) => ({
+        label: item.label,
+        description: item.description,
         value
       }))
     );
@@ -208,30 +181,31 @@ function categoryMenu() {
   return new ActionRowBuilder().addComponents(menu);
 }
 
-function channelMenu() {
+function makeChannelMenu() {
   const menu = new ChannelSelectMenuBuilder()
-    .setCustomId("venom_log_channel")
-    .setPlaceholder("Choose the log channel")
-    .setChannelTypes(ChannelType.GuildText, ChannelType.GuildAnnouncement)
-    .setMinValues(1)
-    .setMaxValues(1);
+    .setCustomId("venom_channel")
+    .setPlaceholder("Select a log channel")
+    .setChannelTypes(
+      ChannelType.GuildText,
+      ChannelType.GuildAnnouncement
+    );
 
   return new ActionRowBuilder().addComponents(menu);
 }
 
-function setupButtons() {
+function makeButtons() {
   return new ActionRowBuilder().addComponents(
     new ButtonBuilder()
       .setCustomId("venom_enable")
-      .setLabel("Enable logs")
+      .setLabel("Enable")
       .setStyle(ButtonStyle.Success),
     new ButtonBuilder()
       .setCustomId("venom_disable")
-      .setLabel("Disable logs")
+      .setLabel("Disable")
       .setStyle(ButtonStyle.Danger),
     new ButtonBuilder()
       .setCustomId("venom_back")
-      .setLabel("Back to categories")
+      .setLabel("Back")
       .setStyle(ButtonStyle.Secondary)
   );
 }
@@ -248,7 +222,9 @@ client.on(Events.InteractionCreate, async (interaction) => {
         });
       }
 
-      if (!interaction.memberPermissions?.has(PermissionFlagsBits.ManageGuild)) {
+      if (!interaction.memberPermissions?.has(
+        PermissionFlagsBits.ManageGuild
+      )) {
         return interaction.reply({
           content: "You need Manage Server permission.",
           ephemeral: true
@@ -256,140 +232,163 @@ client.on(Events.InteractionCreate, async (interaction) => {
       }
 
       return interaction.reply({
-        content: "🕷️ **VENOM LOG — Choose a category**",
-        components: [categoryMenu()],
+        content: "🕷️ VENOM LOG — Select a log type",
+        components: [makeCategoryMenu()],
         ephemeral: true
       });
     }
 
     if (!interaction.guild) return;
 
-    if (interaction.isStringSelectMenu() &&
-        interaction.customId === "venom_category") {
-      const category = interaction.values[0];
-      pendingSetup.set(interaction.user.id, {
+    if (
+      interaction.isStringSelectMenu() &&
+      interaction.customId === "venom_categories"
+    ) {
+      const type = interaction.values[0];
+
+      sessions.set(interaction.user.id, {
         guildId: interaction.guild.id,
-        category
+        type
       });
 
-      const currentChannel = config[interaction.guild.id]?.[category];
+      const entry = configs[interaction.guild.id]?.[type];
 
       return interaction.update({
         content:
-          `**${CATEGORIES[category].label}**\n` +
-          `Current channel: ${currentChannel ? `<#${currentChannel}>` : "Not configured"}\n` +
-          "Choose the channel, then enable the category.",
-        components: [channelMenu(), setupButtons()]
+          `**${LOG_TYPES[type].label}**\n` +
+          `Current channel: ${entry?.channelId ? `<#${entry.channelId}>` : "Not set"}\n` +
+          `Status: ${entry?.enabled ? "Enabled" : "Disabled"}\n` +
+          "Select a channel, then press Enable.",
+        components: [makeChannelMenu(), makeButtons()]
       });
     }
 
-    if (interaction.isChannelSelectMenu() &&
-        interaction.customId === "venom_log_channel") {
-      const pending = pendingSetup.get(interaction.user.id);
+    if (
+      interaction.isChannelSelectMenu() &&
+      interaction.customId === "venom_channel"
+    ) {
+      const session = sessions.get(interaction.user.id);
 
-      if (!pending || pending.guildId !== interaction.guild.id) {
+      if (!session || session.guildId !== interaction.guild.id) {
         return interaction.reply({
-          content: "Choose a category first with /setup-logs.",
+          content: "Run /setup-logs and select a category first.",
           ephemeral: true
         });
       }
 
       const channelId = interaction.values[0];
-      const guildConfig = getGuildConfig(interaction.guild.id);
-      guildConfig[pending.category] = channelId;
-      saveConfig(config);
+      const settings = getConfig(interaction.guild.id);
+
+      if (!settings[session.type]) {
+        settings[session.type] = {
+          channelId: null,
+          enabled: false
+        };
+      }
+
+      settings[session.type].channelId = channelId;
+      saveConfig();
 
       return interaction.update({
         content:
-          `Selected <#${channelId}> for **${CATEGORIES[pending.category].label}**.\n` +
-          "Press **Enable logs** to keep this category active.",
-        components: [channelMenu(), setupButtons()]
+          `Selected <#${channelId}> for **${LOG_TYPES[session.type].label}**.\n` +
+          "Press Enable to activate this log.",
+        components: [makeChannelMenu(), makeButtons()]
       });
     }
 
-    if (interaction.isButton() &&
-        ["venom_enable", "venom_disable", "venom_back"].includes(interaction.customId)) {
-      const pending = pendingSetup.get(interaction.user.id);
-
+    if (
+      interaction.isButton() &&
+      ["venom_enable", "venom_disable", "venom_back"].includes(
+        interaction.customId
+      )
+    ) {
       if (interaction.customId === "venom_back") {
         return interaction.update({
-          content: "🕷️ **VENOM LOG — Choose a category**",
-          components: [categoryMenu()]
+          content: "🕷️ VENOM LOG — Select a log type",
+          components: [makeCategoryMenu()]
         });
       }
 
-      if (!pending || pending.guildId !== interaction.guild.id) {
+      const session = sessions.get(interaction.user.id);
+
+      if (!session || session.guildId !== interaction.guild.id) {
         return interaction.reply({
-          content: "Choose a category first with /setup-logs.",
+          content: "Run /setup-logs and select a category first.",
           ephemeral: true
         });
       }
 
-      const guildConfig = getGuildConfig(interaction.guild.id);
+      const settings = getConfig(interaction.guild.id);
+      const entry = settings[session.type];
 
       if (interaction.customId === "venom_enable") {
-        if (!guildConfig[pending.category]) {
+        if (!entry?.channelId) {
           return interaction.reply({
-            content: "Choose a log channel first.",
+            content: "Select a channel first.",
             ephemeral: true
           });
         }
 
-        guildConfig[`${pending.category}_enabled`] = true;
-        saveConfig(config);
+        entry.enabled = true;
+        saveConfig();
 
         return interaction.update({
-          content: `✅ Enabled **${CATEGORIES[pending.category].label}**.`,
-          components: [categoryMenu()]
+          content:
+            `✅ Enabled ${LOG_TYPES[session.type].label} in <#${entry.channelId}>.`,
+          components: [makeCategoryMenu()]
         });
       }
 
-      guildConfig[`${pending.category}_enabled`] = false;
-      saveConfig(config);
+      if (entry) entry.enabled = false;
+      saveConfig();
 
       return interaction.update({
-        content: `❌ Disabled **${CATEGORIES[pending.category].label}**.`,
-        components: [categoryMenu()]
+        content: `❌ Disabled ${LOG_TYPES[session.type].label}.`,
+        components: [makeCategoryMenu()]
       });
     }
   } catch (error) {
     console.error("Interaction error:", error);
 
-    if (interaction.isRepliable() && !interaction.replied && !interaction.deferred) {
+    if (interaction.isRepliable() &&
+        !interaction.replied &&
+        !interaction.deferred) {
       await interaction.reply({
-        content: "Something went wrong. Check Railway Deploy Logs.",
+        content: "An error occurred. Check Railway Deploy Logs.",
         ephemeral: true
       }).catch(() => {});
     }
   }
 });
 
-// ================= LOG EVENTS =================
+// =============== 1. DELETED MESSAGES ===============
 
-// 1. Deleted messages
 client.on(Events.MessageDelete, async (message) => {
   if (!message.guild || message.author?.bot) return;
-  if (config[message.guild.id]?.messages_enabled === false) return;
 
-  const content = message.content || "Message content unavailable";
+  const content = message.content ||
+    "Content unavailable (message may not have been cached)";
+
   await sendLog(
     message.guild,
-    "messages",
-    "🗑️・الرسائل المحذوفة",
-    `**Member:** ${message.author?.tag || "Unknown"}\n` +
+    "deleted",
+    "🗑️・Deleted Messages",
+    `**Author:** ${message.author?.tag || "Unknown"}\n` +
     `**Channel:** <#${message.channelId}>\n` +
     `**Content:**\n${content.slice(0, 3000)}`
   );
 });
 
-// 2. Edited messages — old and new content
+// =============== 2. EDITED MESSAGES ===============
+
 client.on(Events.MessageUpdate, async (oldMessage, newMessage) => {
   if (!newMessage.guild) return;
-  if (config[newMessage.guild.id]?.messages_enabled === false) return;
 
   if (oldMessage.partial) {
     oldMessage = await oldMessage.fetch().catch(() => oldMessage);
   }
+
   if (newMessage.partial) {
     newMessage = await newMessage.fetch().catch(() => newMessage);
   }
@@ -399,72 +398,69 @@ client.on(Events.MessageUpdate, async (oldMessage, newMessage) => {
 
   await sendLog(
     newMessage.guild,
-    "messages",
-    "✏️・الرسائل المعدّلة",
-    `**Member:** ${newMessage.author?.tag || "Unknown"}\n` +
+    "edited",
+    "✏️・Edited Messages",
+    `**Author:** ${newMessage.author?.tag || "Unknown"}\n` +
     `**Channel:** <#${newMessage.channelId}>\n` +
-    `**Before:**\n${(oldMessage.content || "Unavailable").slice(0, 1500)}\n\n` +
-    `**After:**\n${(newMessage.content || "Unavailable").slice(0, 1500)}`
+    `**Before:**\n${(oldMessage.content || "Content unavailable").slice(0, 1500)}\n\n` +
+    `**After:**\n${(newMessage.content || "Content unavailable").slice(0, 1500)}`
   );
 });
 
-// 3. Member join
-client.on(Events.GuildMemberAdd, async (member) => {
-  if (config[member.guild.id]?.members_enabled === false) return;
+// =============== 3. MEMBER JOIN ===============
 
+client.on(Events.GuildMemberAdd, async (member) => {
   await sendLog(
     member.guild,
-    "members",
-    "📥・دخول عضو",
+    "memberJoin",
+    "📥・Member Join",
     `**Member:** ${member.user.tag}\n**ID:** ${member.id}`
   );
 });
 
-// 3. Member leave
-client.on(Events.GuildMemberRemove, async (member) => {
-  if (config[member.guild.id]?.members_enabled === false) return;
+// =============== 4. MEMBER LEAVE ===============
 
+client.on(Events.GuildMemberRemove, async (member) => {
   await sendLog(
     member.guild,
-    "members",
-    "📤・خروج عضو",
+    "memberLeave",
+    "📤・Member Leave",
     `**Member:** ${member.user?.tag || "Unknown"}\n**ID:** ${member.id}`
   );
 });
 
-// 4. Voice join / leave / move
+// =============== 5 & 6. VOICE JOIN / LEAVE ===============
+
 client.on(Events.VoiceStateUpdate, async (oldState, newState) => {
   const member = newState.member || oldState.member;
   if (!member || member.user.bot) return;
-  if (config[member.guild.id]?.voice_enabled === false) return;
-
-  let action = "";
 
   if (!oldState.channelId && newState.channelId) {
-    action = `Joined <#${newState.channelId}>`;
-  } else if (oldState.channelId && !newState.channelId) {
-    action = `Left **${oldState.channel?.name || "voice channel"}**`;
-  } else if (oldState.channelId !== newState.channelId) {
-    action = `Moved from **${oldState.channel?.name || "unknown"}** to <#${newState.channelId}>`;
+    await sendLog(
+      member.guild,
+      "voiceJoin",
+      "🎙️・Voice Join",
+      `**Member:** ${member.user.tag}\n**Channel:** <#${newState.channelId}>`
+    );
   }
 
-  if (!action) return;
-
-  await sendLog(
-    member.guild,
-    "voice",
-    "🎙️・دخول وخروج الفويس",
-    `**Member:** ${member.user.tag}\n${action}`
-  );
+  if (oldState.channelId && !newState.channelId) {
+    await sendLog(
+      member.guild,
+      "voiceLeave",
+      "🔇・Voice Leave",
+      `**Member:** ${member.user.tag}\n**Channel:** ${oldState.channel?.name || "Unknown"}`
+    );
+  }
 });
 
-// 5. Member role added / removed
-client.on(Events.GuildMemberUpdate, async (oldMember, newMember) => {
-  if (config[newMember.guild.id]?.roles_enabled === false) return;
+// =============== 7 & 8. ROLE ADDED / REMOVED ===============
 
+client.on(Events.GuildMemberUpdate, async (oldMember, newMember) => {
   const added = newMember.roles.cache.filter(
     role => !oldMember.roles.cache.has(role.id)
   );
+
   const removed = oldMember.roles.cache.filter(
     role => !newMember.roles.cache.has(role.id)
   );
@@ -472,8 +468,8 @@ client.on(Events.GuildMemberUpdate, async (oldMember, newMember) => {
   for (const role of added.values()) {
     await sendLog(
       newMember.guild,
-      "roles",
-      "🎭・إعطاء رول",
+      "roleAdded",
+      "🎭・Role Added",
       `**Member:** ${newMember.user.tag}\n**Role:** ${role.name}`
     );
   }
@@ -481,115 +477,40 @@ client.on(Events.GuildMemberUpdate, async (oldMember, newMember) => {
   for (const role of removed.values()) {
     await sendLog(
       newMember.guild,
-      "roles",
-      "🎭・إزالة رول",
+      "roleRemoved",
+      "➖・Role Removed",
       `**Member:** ${newMember.user.tag}\n**Role:** ${role.name}`
     );
   }
 });
 
-// 6. Role created
-client.on(Events.GuildRoleCreate, async (role) => {
-  if (config[role.guild.id]?.roleCreate_enabled === false) return;
+// =============== 9. CHANNEL CREATED ===============
 
-  await sendLog(
-    role.guild,
-    "roleCreate",
-    "🆕・إضافة رول",
-    `**Role:** ${role.name}\n**ID:** ${role.id}`
-  );
-});
-
-// 7. Channel created
 client.on(Events.ChannelCreate, async (channel) => {
   if (!channel.guild) return;
-  if (config[channel.guild.id]?.channelCreate_enabled === false) return;
 
   await sendLog(
     channel.guild,
-    "channelCreate",
-    "🟢・إضافة روم",
+    "channelCreated",
+    "🟢・Channel Created",
     `**Channel:** ${channel.name}\n**ID:** ${channel.id}`
   );
 });
 
-// 8. Channel deleted
+// =============== 10. CHANNEL DELETED ===============
+
 client.on(Events.ChannelDelete, async (channel) => {
   if (!channel.guild) return;
-  if (config[channel.guild.id]?.channelDelete_enabled === false) return;
 
   await sendLog(
     channel.guild,
-    "channelDelete",
-    "🔴・إزالة روم",
+    "channelDeleted",
+    "🔴・Channel Deleted",
     `**Channel:** ${channel.name}\n**ID:** ${channel.id}`
   );
 });
 
-// ================= OPTIONAL WEBSITE API =================
-
-app.get("/health", (req, res) => {
-  res.json({
-    status: "ok",
-    botReady: client.isReady(),
-    bot: client.user?.tag || null
-  });
-});
-
-function authorizeApi(req, res, next) {
-  if (!BOT_CONTROL_SECRET ||
-      req.get("x-bot-secret") !== BOT_CONTROL_SECRET) {
-    return res.status(401).json({ error: "Unauthorized" });
-  }
-  next();
-}
-
-app.get("/api/guild/:guildId", authorizeApi, (req, res) => {
-  res.json(config[req.params.guildId] || {});
-});
-
-app.put("/api/guild/:guildId", authorizeApi, (req, res) => {
-  const guildId = req.params.guildId;
-
-  if (!/^\d{17,20}$/.test(guildId)) {
-    return res.status(400).json({ error: "Invalid guild ID" });
-  }
-
-  if (!req.body || typeof req.body !== "object" || Array.isArray(req.body)) {
-    return res.status(400).json({ error: "Invalid config" });
-  }
-
-  const allowedKeys = [
-    ...Object.keys(CATEGORIES),
-    ...Object.keys(CATEGORIES).map(key => `${key}_enabled`)
-  ];
-
-  for (const key of Object.keys(req.body)) {
-    if (!allowedKeys.includes(key)) {
-      return res.status(400).json({ error: `Unsupported key: ${key}` });
-    }
-  }
-
-  for (const key of Object.keys(CATEGORIES)) {
-    if (req.body[key] !== undefined &&
-        !/^\d{17,20}$/.test(String(req.body[key]))) {
-      return res.status(400).json({ error: `Invalid channel ID for ${key}` });
-    }
-  }
-
-  config[guildId] = {
-    ...(config[guildId] || {}),
-    ...req.body
-  };
-
-  saveConfig(config);
-  res.json({ success: true, config: config[guildId] });
-});
-
-const PORT = process.env.PORT || 3000;
-app.listen(PORT, "0.0.0.0", () => {
-  console.log(`VENOM LOG API listening on ${PORT}`);
-});
+// =============== LOGIN ===============
 
 client.login(TOKEN).catch(error => {
   console.error("Discord login failed:", error.message);
