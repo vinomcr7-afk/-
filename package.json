@@ -1,13 +1,12 @@
-
 {
-  "name": "pw-venom-log",
-  "version": "1.0.0",
-  "description": "PW VENOM LOG Discord Bot",
-  "main": "index.js",
-  "scripts": {
-    "start": "node index.js"
-  },
-  "dependencies": {
-    "discord.js": "^14.19.3"
-  }
+"name": "pw-venom-log-bot",
+"version": "1.0.0",
+"main": "index.js",
+"scripts": {
+"start": "node index.js"
+},
+"dependencies": {
+"discord.js": "^14.19.3",
+"express": "^4.21.2"
+}
 }
