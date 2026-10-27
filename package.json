@@ -1,8 +1,6 @@
-
 {
-  "name": "pw-venom-bot",
+  "name": "venom-log",
   "version": "1.0.0",
-  "description": "PW VENOM LOGS Discord Bot",
   "main": "index.js",
   "scripts": {
     "start": "node index.js"
