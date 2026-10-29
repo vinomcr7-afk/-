@@ -13,7 +13,8 @@ const {
   ChannelSelectMenuBuilder,
   ButtonBuilder,
   ButtonStyle,
-  Events
+  Events,
+  AuditLogEvent
 } = require("discord.js");
 
 const express = require("express");
@@ -24,8 +25,8 @@ const path = require("path");
 const TOKEN = process.env.DISCORD_TOKEN;
 const CLIENT_ID = process.env.DISCORD_CLIENT_ID;
 const BOT_CONTROL_SECRET = process.env.BOT_CONTROL_SECRET;
-
 const PORT = process.env.PORT || 3000;
+
 const CONFIG_FILE = path.join(__dirname, "logs-config.json");
 
 if (!TOKEN) throw new Error("Missing DISCORD_TOKEN");
@@ -48,27 +49,29 @@ const client = new Client({
   ]
 });
 
+// All 16 log types
 const LOG_TYPES = {
-  deletedMessages: "Deleted messages",
-  editedMessages: "Edited messages",
-  memberJoin: "Member joined",
-  memberLeave: "Member left",
-  voiceJoin: "Joined voice",
-  voiceLeave: "Left voice",
-  roleAdded: "Role added",
-  roleRemoved: "Role removed",
-  channelCreated: "Channel created",
-  channelDeleted: "Channel deleted",
-  channelUpdated: "Channel updated",
-  roleUpdated: "Role updated",
-  nameChanged: "Nickname changed",
-  serverUpdated: "Server updated",
-  memberBanned: "Member banned",
-  voiceMuted: "Voice mute changed"
+  deletedMessages: "Deleted Messages",
+  editedMessages: "Edited Messages",
+  memberJoin: "Member Joined",
+  memberLeave: "Member Left",
+  voiceJoin: "Voice Joined",
+  voiceLeave: "Voice Left",
+  roleAdded: "Role Added",
+  roleRemoved: "Role Removed",
+  channelCreated: "Channel Created",
+  channelDeleted: "Channel Deleted",
+  channelUpdated: "Channel Updated",
+  roleUpdated: "Role Updated",
+  nameChanged: "Nickname Changed",
+  serverUpdated: "Server Updated",
+  memberBanned: "Member Banned",
+  voiceMuted: "Voice Muted"
 };
 
 const TYPE_NAMES = Object.keys(LOG_TYPES);
 
+// Load saved configuration
 function loadConfig() {
   try {
     if (fs.existsSync(CONFIG_FILE)) {
@@ -77,6 +80,7 @@ function loadConfig() {
   } catch (error) {
     console.error("Config load error:", error);
   }
+
   return {};
 }
 
@@ -101,52 +105,119 @@ function ensureGuildConfig(guildId) {
   saveConfig();
 }
 
-async function sendLog(guild, type, description, actor = null, target = null) {
+// Get a readable user label
+function userLabel(user) {
+  if (!user) return "Unknown";
+
+  return [
+    user.tag || user.username || "Unknown",
+    `ID: ${user.id}`
+  ].join("\n");
+}
+
+// Send a log embed, including actor avatar and ID when available
+async function sendLog(
+  guild,
+  type,
+  description,
+  actor = null,
+  target = null,
+  extraFields = []
+) {
   try {
+    if (!guild) return;
+
     ensureGuildConfig(guild.id);
 
     const entry = config[guild.id][type];
+
     if (!entry || !entry.enabled || !entry.channelId) return;
 
-    const channel = await guild.channels.fetch(entry.channelId).catch(() => null);
-    if (!channel || !channel.isTextBased()) return;
+    const channel = await guild.channels
+      .fetch(entry.channelId)
+      .catch(() => null);
+
+    if (!channel || !channel.isTextBased() || !channel.send) return;
 
     const embed = new EmbedBuilder()
       .setColor(0x8b0000)
       .setTitle(`PW VENOM LOG • ${LOG_TYPES[type] || type}`)
-      .setDescription(description.slice(0, 4000))
+      .setDescription(String(description || "No details available").slice(0, 4000))
+      .setFooter({ text: `Server: ${guild.name} • ID: ${guild.id}` })
       .setTimestamp();
 
-    if (actor) embed.addFields({
-      name: "Actor",
-      value: String(actor).slice(0, 1024)
-    });
+    if (actor) {
+      const actorUser = actor.user || actor;
 
-    if (target) embed.addFields({
-      name: "Target",
-      value: String(target).slice(0, 1024)
-    });
+      embed.addFields({
+        name: "Actor",
+        value: userLabel(actorUser).slice(0, 1024),
+        inline: true
+      });
+
+      if (actorUser.displayAvatarURL) {
+        embed.setThumbnail(
+          actorUser.displayAvatarURL({ size: 256 })
+        );
+      }
+    } else {
+      embed.addFields({
+        name: "Actor",
+        value: "Unknown — actor could not be identified",
+        inline: true
+      });
+    }
+
+    if (target) {
+      embed.addFields({
+        name: "Target",
+        value: String(target).slice(0, 1024),
+        inline: true
+      });
+    }
+
+    for (const field of extraFields) {
+      embed.addFields({
+        name: String(field.name).slice(0, 256),
+        value: String(field.value || "None").slice(0, 1024),
+        inline: field.inline ?? false
+      });
+    }
 
     await channel.send({ embeds: [embed] });
   } catch (error) {
-    console.error("Log send error:", error);
+    console.error("Log send error:", error.message);
   }
 }
 
-async function findAuditActor(guild, type, targetId) {
+// Find the actor in Discord Audit Log
+async function findAuditActor(guild, auditType, targetId = null) {
   try {
-    const logs = await guild.fetchAuditLogs({ type, limit: 5 });
-    const entry = logs.entries.find(item =>
-      item.target?.id === targetId &&
-      Date.now() - item.createdTimestamp < 15000
-    );
-    return entry?.executor?.tag || null;
-  } catch {
+    const logs = await guild.fetchAuditLogs({
+      type: auditType,
+      limit: 6
+    });
+
+    const now = Date.now();
+
+    const entry = logs.entries.find(item => {
+      const recent = now - item.createdTimestamp < 15000;
+      const targetMatches =
+        !targetId || item.target?.id === targetId;
+
+      return recent && targetMatches;
+    });
+
+    return entry || null;
+  } catch (error) {
+    console.error("Audit log unavailable:", error.message);
     return null;
   }
 }
 
+// API server for the web dashboard
 const app = express();
+
 app.use(express.json({ limit: "20kb" }));
 
 function authenticateApi(req, res, next) {
@@ -156,7 +227,10 @@ function authenticateApi(req, res, next) {
   const a = Buffer.from(auth);
   const b = Buffer.from(expected);
 
-  if (a.length !== b.length || !crypto.timingSafeEqual(a, b)) {
+  if (
+    a.length !== b.length ||
+    !crypto.timingSafeEqual(a, b)
+  ) {
     return res.status(401).json({ error: "Unauthorized" });
   }
 
@@ -164,103 +238,147 @@ function authenticateApi(req, res, next) {
 }
 
 app.get("/health", (req, res) => {
-  res.json({ ok: true, botReady: client.isReady() });
+  res.json({
+    ok: true,
+    botReady: client.isReady()
+  });
 });
 
-app.get("/api/guilds/:guildId/config", authenticateApi, (req, res) => {
-  const { guildId } = req.params;
-
-  if (!/^\d{17,20}$/.test(guildId)) {
-    return res.status(400).json({ error: "Invalid guild ID" });
-  }
-
-  if (!client.guilds.cache.has(guildId)) {
-    return res.status(404).json({ error: "Bot is not in this server" });
-  }
-
-  ensureGuildConfig(guildId);
-
-  const settings = config[guildId];
-  const channelId =
-    Object.values(settings).find(entry => entry.channelId)?.channelId || "";
-
-  const events = TYPE_NAMES.filter(type => settings[type].enabled);
-
-  res.json({ channelId, events, settings });
-});
-
-app.put("/api/guilds/:guildId/config", authenticateApi, async (req, res) => {
-  try {
+app.get(
+  "/api/guilds/:guildId/config",
+  authenticateApi,
+  (req, res) => {
     const { guildId } = req.params;
 
     if (!/^\d{17,20}$/.test(guildId)) {
       return res.status(400).json({ error: "Invalid guild ID" });
     }
 
-    const guild = client.guilds.cache.get(guildId);
-    if (!guild) {
-      return res.status(404).json({ error: "Bot is not in this server" });
-    }
-
-    const { channelId, events } = req.body || {};
-
-    if (
-      typeof channelId !== "string" ||
-      !Array.isArray(events) ||
-      !events.every(type => typeof type === "string" && TYPE_NAMES.includes(type))
-    ) {
-      return res.status(400).json({ error: "Invalid channelId or events" });
-    }
-
-    const channel = await guild.channels.fetch(channelId).catch(() => null);
-
-    if (!channel || channel.type !== ChannelType.GuildText) {
-      return res.status(400).json({
-        error: "Channel must be a text channel in this server"
-      });
-    }
-
-    const botMember = guild.members.me;
-    const permissions = channel.permissionsFor(botMember);
-
-    if (
-      !permissions ||
-      !permissions.has([
-        PermissionFlagsBits.ViewChannel,
-        PermissionFlagsBits.SendMessages,
-        PermissionFlagsBits.EmbedLinks
-      ])
-    ) {
-      return res.status(400).json({
-        error: "Bot lacks permissions in the selected channel"
+    if (!client.guilds.cache.has(guildId)) {
+      return res.status(404).json({
+        error: "Bot is not in this server"
       });
     }
 
     ensureGuildConfig(guildId);
 
-    for (const type of TYPE_NAMES) {
-      config[guildId][type] = {
-        channelId,
-        enabled: events.includes(type)
-      };
-    }
+    const settings = config[guildId];
 
-    saveConfig();
-    res.json({ ok: true, message: "Log settings saved" });
-  } catch (error) {
-    console.error("API save error:", error);
-    res.status(500).json({ error: "Could not save configuration" });
+    const channelId =
+      Object.values(settings).find(
+        entry => entry.channelId
+      )?.channelId || "";
+
+    const events = TYPE_NAMES.filter(
+      type => settings[type].enabled
+    );
+
+    res.json({
+      channelId,
+      events,
+      settings
+    });
   }
-});
+);
+
+app.put(
+  "/api/guilds/:guildId/config",
+  authenticateApi,
+  async (req, res) => {
+    try {
+      const { guildId } = req.params;
+
+      if (!/^\d{17,20}$/.test(guildId)) {
+        return res.status(400).json({
+          error: "Invalid guild ID"
+        });
+      }
+
+      const guild = client.guilds.cache.get(guildId);
+
+      if (!guild) {
+        return res.status(404).json({
+          error: "Bot is not in this server"
+        });
+      }
+
+      const { channelId, events } = req.body || {};
+
+      if (
+        typeof channelId !== "string" ||
+        !Array.isArray(events) ||
+        !events.every(
+          type => typeof type === "string" &&
+            TYPE_NAMES.includes(type)
+        )
+      ) {
+        return res.status(400).json({
+          error: "Invalid channelId or events"
+        });
+      }
+
+      const channel = await guild.channels
+        .fetch(channelId)
+        .catch(() => null);
+
+      if (!channel || channel.type !== ChannelType.GuildText) {
+        return res.status(400).json({
+          error: "Channel must be a text channel"
+        });
+      }
+
+      const botMember = guild.members.me;
+      const permissions = channel.permissionsFor(botMember);
+
+      if (
+        !permissions ||
+        !permissions.has([
+          PermissionFlagsBits.ViewChannel,
+          PermissionFlagsBits.SendMessages,
+          PermissionFlagsBits.EmbedLinks
+        ])
+      ) {
+        return res.status(400).json({
+          error: "Bot lacks permissions in the selected channel"
+        });
+      }
+
+      ensureGuildConfig(guildId);
+
+      for (const type of TYPE_NAMES) {
+        config[guildId][type] = {
+          channelId,
+          enabled: events.includes(type)
+        };
+      }
+
+      saveConfig();
+
+      res.json({
+        ok: true,
+        message: "Log settings saved"
+      });
+    } catch (error) {
+      console.error("API save error:", error);
+
+      res.status(500).json({
+        error: "Could not save configuration"
+      });
+    }
+  }
+);
 
 app.listen(PORT, "0.0.0.0", () => {
   console.log(`PW VENOM LOG API listening on port ${PORT}`);
 });
 
+// Slash command
 const setupCommand = new SlashCommandBuilder()
   .setName("setup-logs")
-  .setDescription("Configure PW VENOM LOG event settings")
-  .setDefaultMemberPermissions(PermissionFlagsBits.Administrator);
+  .setDescription("Configure PW VENOM LOG")
+  .setDefaultMemberPermissions(
+    PermissionFlagsBits.Administrator
+  );
 
 client.once(Events.ClientReady, async readyClient => {
   console.log(`PW VENOM LOG online as ${readyClient.user.tag}`);
@@ -272,143 +390,297 @@ client.once(Events.ClientReady, async readyClient => {
       Routes.applicationCommands(CLIENT_ID),
       { body: [setupCommand.toJSON()] }
     );
+
     console.log("Slash commands registered");
   } catch (error) {
     console.error("Command registration error:", error);
   }
 });
 
+// Interactive setup menu
 client.on(Events.InteractionCreate, async interaction => {
-  if (interaction.isChatInputCommand() && interaction.commandName === "setup-logs") {
-    if (!interaction.guild || !interaction.memberPermissions?.has(PermissionFlagsBits.Administrator)) {
+  try {
+    if (
+      interaction.isChatInputCommand() &&
+      interaction.commandName === "setup-logs"
+    ) {
+      if (
+        !interaction.guild ||
+        !interaction.memberPermissions?.has(
+          PermissionFlagsBits.Administrator
+        )
+      ) {
+        return interaction.reply({
+          content: "Administrator permission required.",
+          ephemeral: true
+        });
+      }
+
+      const menu = new StringSelectMenuBuilder()
+        .setCustomId("pw_log_type")
+        .setPlaceholder("Choose a log event")
+        .addOptions(
+          TYPE_NAMES.map(type => ({
+            label: LOG_TYPES[type],
+            value: type
+          }))
+        );
+
       return interaction.reply({
-        content: "Administrator permission required.",
+        content: "Choose a log event to configure.",
+        components: [
+          new ActionRowBuilder().addComponents(menu)
+        ],
         ephemeral: true
       });
     }
 
-    const menu = new StringSelectMenuBuilder()
-      .setCustomId("pw_log_type")
-      .setPlaceholder("Choose a log event")
-      .addOptions(TYPE_NAMES.map(type => ({
-        label: LOG_TYPES[type],
-        value: type
-      })));
+    if (
+      interaction.isStringSelectMenu() &&
+      interaction.customId === "pw_log_type"
+    ) {
+      const type = interaction.values[0];
 
-    return interaction.reply({
-      content: "Choose a log event, then select a text channel and enable it.",
-      components: [new ActionRowBuilder().addComponents(menu)],
-      ephemeral: true
-    });
-  }
+      const channelMenu = new ChannelSelectMenuBuilder()
+        .setCustomId(`pw_log_channel:${type}`)
+        .setPlaceholder("Choose a log channel")
+        .setChannelTypes(ChannelType.GuildText);
 
-  if (interaction.isStringSelectMenu() && interaction.customId === "pw_log_type") {
-    const type = interaction.values[0];
-
-    const channelMenu = new ChannelSelectMenuBuilder()
-      .setCustomId(`pw_log_channel:${type}`)
-      .setPlaceholder("Choose a log channel")
-      .setChannelTypes(ChannelType.GuildText);
-
-    return interaction.update({
-      content: `Selected: **${LOG_TYPES[type]}**. Choose a channel.`,
-      components: [new ActionRowBuilder().addComponents(channelMenu)]
-    });
-  }
-
-  if (interaction.isChannelSelectMenu() && interaction.customId.startsWith("pw_log_channel:")) {
-    const type = interaction.customId.split(":")[1];
-    const channelId = interaction.values[0];
-
-    ensureGuildConfig(interaction.guildId);
-    config[interaction.guildId][type].channelId = channelId;
-
-    const buttons = new ActionRowBuilder().addComponents(
-      new ButtonBuilder()
-        .setCustomId(`pw_log_enable:${type}`)
-        .setLabel("Enable")
-        .setStyle(ButtonStyle.Success),
-      new ButtonBuilder()
-        .setCustomId(`pw_log_disable:${type}`)
-        .setLabel("Disable")
-        .setStyle(ButtonStyle.Danger)
-    );
-
-    saveConfig();
-
-    return interaction.update({
-      content: `Channel saved for **${LOG_TYPES[type]}**. Choose Enable or Disable.`,
-      components: [buttons]
-    });
-  }
-
-  if (interaction.isButton() && /^(pw_log_enable|pw_log_disable):/.test(interaction.customId)) {
-    const [action, type] = interaction.customId.split(":");
-
-    if (!TYPE_NAMES.includes(type)) {
-      return interaction.reply({ content: "Unknown log type.", ephemeral: true });
+      return interaction.update({
+        content: `Selected: ${LOG_TYPES[type]}. Choose a channel.`,
+        components: [
+          new ActionRowBuilder().addComponents(channelMenu)
+        ]
+      });
     }
 
-    ensureGuildConfig(interaction.guildId);
-    config[interaction.guildId][type].enabled = action === "pw_log_enable";
-    saveConfig();
+    if (
+      interaction.isChannelSelectMenu() &&
+      interaction.customId.startsWith("pw_log_channel:")
+    ) {
+      const type = interaction.customId.split(":")[1];
+      const channelId = interaction.values[0];
 
-    return interaction.update({
-      content: `**${LOG_TYPES[type]}** is now ${action === "pw_log_enable" ? "enabled" : "disabled"}.`,
-      components: []
-    });
+      if (!TYPE_NAMES.includes(type)) {
+        return interaction.reply({
+          content: "Unknown log type.",
+          ephemeral: true
+        });
+      }
+
+      ensureGuildConfig(interaction.guildId);
+
+      config[interaction.guildId][type].channelId = channelId;
+
+      const buttons = new ActionRowBuilder().addComponents(
+        new ButtonBuilder()
+          .setCustomId(`pw_log_enable:${type}`)
+          .setLabel("Enable")
+          .setStyle(ButtonStyle.Success),
+        new ButtonBuilder()
+          .setCustomId(`pw_log_disable:${type}`)
+          .setLabel("Disable")
+          .setStyle(ButtonStyle.Danger)
+      );
+
+      saveConfig();
+
+      return interaction.update({
+        content: `Channel saved for ${LOG_TYPES[type]}.`,
+        components: [buttons]
+      });
+    }
+
+    if (
+      interaction.isButton() &&
+      /^(pw_log_enable|pw_log_disable):/.test(interaction.customId)
+    ) {
+      const [action, type] = interaction.customId.split(":");
+
+      if (!TYPE_NAMES.includes(type)) {
+        return interaction.reply({
+          content: "Unknown log type.",
+          ephemeral: true
+        });
+      }
+
+      ensureGuildConfig(interaction.guildId);
+
+      config[interaction.guildId][type].enabled =
+        action === "pw_log_enable";
+
+      saveConfig();
+
+      return interaction.update({
+        content: `${LOG_TYPES[type]}: ${
+          action === "pw_log_enable" ? "Enabled" : "Disabled"
+        }.`,
+        components: []
+      });
+    }
+  } catch (error) {
+    console.error("Interaction error:", error);
+
+    if (!interaction.replied && !interaction.deferred) {
+      await interaction.reply({
+        content: "An error occurred. Check the bot logs.",
+        ephemeral: true
+      }).catch(() => {});
+    }
   }
 });
 
+// 1. Deleted messages
 client.on(Events.MessageDelete, async message => {
   if (!message.guild || message.author?.bot) return;
+
+  const audit = await findAuditActor(
+    message.guild,
+    AuditLogEvent.MessageDelete,
+    message.author?.id
+  );
+
+  const actor = audit?.executor || null;
+
   await sendLog(
     message.guild,
     "deletedMessages",
-    `Message deleted in <#${message.channelId}>.\nContent: ${(message.content || "[No content available]").slice(0, 3000)}`,
-    null,
-    message.author?.tag || "Unknown user"
+    `Message deleted in <#${message.channelId}>.`,
+    actor,
+    message.author
+      ? userLabel(message.author)
+      : "Message author unavailable",
+    [
+      {
+        name: "Deleted Content",
+        value: message.content || "Content unavailable"
+      },
+      {
+        name: "Channel ID",
+        value: message.channelId
+      }
+    ]
   );
 });
 
+// 2. Edited messages: before and after
 client.on(Events.MessageUpdate, async (oldMessage, newMessage) => {
-  if (!newMessage.guild || newMessage.author?.bot) return;
-  if (oldMessage.partial) oldMessage = await oldMessage.fetch().catch(() => oldMessage);
+  if (!newMessage.guild) return;
 
-  await sendLog(
-    newMessage.guild,
-    "editedMessages",
-    `Message edited in <#${newMessage.channelId}>.\nBefore: ${(oldMessage.content || "[No content]").slice(0, 1500)}\nAfter: ${(newMessage.content || "[No content]").slice(0, 1500)}`,
-    null,
-    newMessage.author?.tag || "Unknown user"
+  try {
+    if (oldMessage.partial) {
+      oldMessage = await oldMessage.fetch().catch(() => oldMessage);
+    }
+
+    if (newMessage.partial) {
+      newMessage = await newMessage.fetch().catch(() => newMessage);
+    }
+
+    if (newMessage.author?.bot) return;
+
+    const before = oldMessage.content || "Content unavailable";
+    const after = newMessage.content || "Content unavailable";
+
+    if (before === after) return;
+
+    await sendLog(
+      newMessage.guild,
+      "editedMessages",
+      `Message edited in <#${newMessage.channelId}>.`,
+      newMessage.author,
+      userLabel(newMessage.author),
+      [
+        {
+          name: "Before",
+          value: before
+        },
+        {
+          name: "After",
+          value: after
+        },
+        {
+          name: "Message Link",
+          value: `https://discord.com/channels/${newMessage.guild.id}/${newMessage.channelId}/${newMessage.id}`
+        }
+      ]
+    );
+  } catch (error) {
+    console.error("Message update error:", error);
+  }
+});
+
+// 3. Member joined
+client.on(Events.GuildMemberAdd, member => {
+  sendLog(
+    member.guild,
+    "memberJoin",
+    `${member.user.tag} joined the server.`,
+    member.user,
+    userLabel(member.user)
   );
 });
 
-client.on(Events.GuildMemberAdd, member => {
-  sendLog(member.guild, "memberJoin", `${member.user.tag} joined the server.`, null, member.user.tag);
-});
-
+// 4. Member left
 client.on(Events.GuildMemberRemove, member => {
-  sendLog(member.guild, "memberLeave", `${member.user.tag} left the server.`, null, member.user.tag);
+  sendLog(
+    member.guild,
+    "memberLeave",
+    `${member.user.tag} left the server.`,
+    member.user,
+    userLabel(member.user)
+  );
 });
 
-client.on(Events.VoiceStateUpdate, (oldState, newState) => {
+// 5, 6, 16. Voice join, leave, mute
+client.on(Events.VoiceStateUpdate, async (oldState, newState) => {
   const member = newState.member || oldState.member;
+
   if (!member || member.user.bot) return;
 
   if (!oldState.channelId && newState.channelId) {
-    sendLog(member.guild, "voiceJoin", `${member.user.tag} joined <#${newState.channelId}>.`);
+    sendLog(
+      member.guild,
+      "voiceJoin",
+      `${member.user.tag} joined <#${newState.channelId}>.`,
+      member.user,
+      userLabel(member.user)
+    );
   }
 
   if (oldState.channelId && !newState.channelId) {
-    sendLog(member.guild, "voiceLeave", `${member.user.tag} left <#${oldState.channelId}>.`);
+    sendLog(
+      member.guild,
+      "voiceLeave",
+      `${member.user.tag} left <#${oldState.channelId}>.`,
+      member.user,
+      userLabel(member.user)
+    );
   }
 
   if (oldState.serverMute !== newState.serverMute) {
-    sendLog(member.guild, "voiceMuted", `${member.user.tag} server mute changed to ${newState.serverMute}.`);
+    const audit = await findAuditActor(
+      member.guild,
+      AuditLogEvent.MemberUpdate,
+      member.id
+    );
+
+    sendLog(
+      member.guild,
+      "voiceMuted",
+      `${member.user.tag} server mute changed to ${newState.serverMute}.`,
+      audit?.executor || null,
+      userLabel(member.user),
+      [
+        {
+          name: "Server Muted",
+          value: String(newState.serverMute)
+        }
+      ]
+    );
   }
 });
 
+// 7, 8, 13. Role changes and nickname changes
 client.on(Events.GuildMemberUpdate, async (oldMember, newMember) => {
   const oldRoles = new Set(oldMember.roles.cache.keys());
   const newRoles = new Set(newMember.roles.cache.keys());
@@ -416,44 +688,216 @@ client.on(Events.GuildMemberUpdate, async (oldMember, newMember) => {
   for (const roleId of newRoles) {
     if (!oldRoles.has(roleId)) {
       const role = newMember.guild.roles.cache.get(roleId);
-      if (role) sendLog(newMember.guild, "roleAdded", `Role <@&${roleId}> added to ${newMember.user.tag}.`);
+
+      const audit = await findAuditActor(
+        newMember.guild,
+        AuditLogEvent.MemberRoleUpdate,
+        newMember.id
+      );
+
+      if (role) {
+        await sendLog(
+          newMember.guild,
+          "roleAdded",
+          `Role ${role.name} added to ${newMember.user.tag}.`,
+          audit?.executor || null,
+          userLabel(newMember.user),
+          [
+            { name: "Role", value: `${role.name}\nID: ${role.id}` }
+          ]
+        );
+      }
     }
   }
 
   for (const roleId of oldRoles) {
     if (!newRoles.has(roleId)) {
       const role = oldMember.guild.roles.cache.get(roleId);
-      if (role) sendLog(newMember.guild, "roleRemoved", `Role <@&${roleId}> removed from ${newMember.user.tag}.`);
+
+      const audit = await findAuditActor(
+        oldMember.guild,
+        AuditLogEvent.MemberRoleUpdate,
+        oldMember.id
+      );
+
+      if (role) {
+        await sendLog(
+          oldMember.guild,
+          "roleRemoved",
+          `Role ${role.name} removed from ${oldMember.user.tag}.`,
+          audit?.executor || null,
+          userLabel(oldMember.user),
+          [
+            { name: "Role", value: `${role.name}\nID: ${role.id}` }
+          ]
+        );
+      }
     }
   }
 
   if (oldMember.nickname !== newMember.nickname) {
-    sendLog(newMember.guild, "nameChanged", `${newMember.user.tag} nickname changed from ${oldMember.nickname || "none"} to ${newMember.nickname || "none"}.`);
+    const audit = await findAuditActor(
+      newMember.guild,
+      AuditLogEvent.MemberUpdate,
+      newMember.id
+    );
+
+    await sendLog(
+      newMember.guild,
+      "nameChanged",
+      `${newMember.user.tag} nickname changed.`,
+      audit?.executor || null,
+      userLabel(newMember.user),
+      [
+        {
+          name: "Before",
+          value: oldMember.nickname || "None"
+        },
+        {
+          name: "After",
+          value: newMember.nickname || "None"
+        }
+      ]
+    );
   }
 });
 
-client.on(Events.ChannelCreate, channel => {
-  if (channel.guild) sendLog(channel.guild, "channelCreated", `Channel created: ${channel.name} (${channel.id}).`);
+// 9. Channel created
+client.on(Events.ChannelCreate, async channel => {
+  if (!channel.guild) return;
+
+  const audit = await findAuditActor(
+    channel.guild,
+    AuditLogEvent.ChannelCreate,
+    channel.id
+  );
+
+  sendLog(
+    channel.guild,
+    "channelCreated",
+    `Channel created: ${channel.name}.`,
+    audit?.executor || null,
+    `${channel.name}\nID: ${channel.id}`
+  );
 });
 
-client.on(Events.ChannelDelete, channel => {
-  if (channel.guild) sendLog(channel.guild, "channelDeleted", `Channel deleted: ${channel.name} (${channel.id}).`);
+// 10. Channel deleted
+client.on(Events.ChannelDelete, async channel => {
+  if (!channel.guild) return;
+
+  const audit = await findAuditActor(
+    channel.guild,
+    AuditLogEvent.ChannelDelete,
+    channel.id
+  );
+
+  sendLog(
+    channel.guild,
+    "channelDeleted",
+    `Channel deleted: ${channel.name}.`,
+    audit?.executor || null,
+    `${channel.name}\nID: ${channel.id}`
+  );
 });
 
-client.on(Events.ChannelUpdate, (oldChannel, newChannel) => {
-  if (newChannel.guild) sendLog(newChannel.guild, "channelUpdated", `Channel updated: ${oldChannel.name} → ${newChannel.name}.`);
+// 11. Channel updated
+client.on(Events.ChannelUpdate, async (oldChannel, newChannel) => {
+  if (!newChannel.guild) return;
+
+  const audit = await findAuditActor(
+    newChannel.guild,
+    AuditLogEvent.ChannelUpdate,
+    newChannel.id
+  );
+
+  sendLog(
+    newChannel.guild,
+    "channelUpdated",
+    `Channel updated: ${oldChannel.name} → ${newChannel.name}.`,
+    audit?.executor || null,
+    `${newChannel.name}\nID: ${newChannel.id}`,
+    [
+      {
+        name: "Before",
+        value: `Name: ${oldChannel.name}\nTopic: ${oldChannel.topic || "None"}`
+      },
+      {
+        name: "After",
+        value: `Name: ${newChannel.name}\nTopic: ${newChannel.topic || "None"}`
+      }
+    ]
+  );
 });
 
-client.on(Events.RoleUpdate, (oldRole, newRole) => {
-  sendLog(newRole.guild, "roleUpdated", `Role updated: ${oldRole.name} → ${newRole.name}.`);
+// 12. Role updated
+client.on(Events.RoleUpdate, async (oldRole, newRole) => {
+  const audit = await findAuditActor(
+    newRole.guild,
+    AuditLogEvent.RoleUpdate,
+    newRole.id
+  );
+
+  sendLog(
+    newRole.guild,
+    "roleUpdated",
+    `Role updated: ${oldRole.name} → ${newRole.name}.`,
+    audit?.executor || null,
+    `${newRole.name}\nID: ${newRole.id}`,
+    [
+      {
+        name: "Before",
+        value: `Name: ${oldRole.name}\nColor: ${oldRole.hexColor}`
+      },
+      {
+        name: "After",
+        value: `Name: ${newRole.name}\nColor: ${newRole.hexColor}`
+      }
+    ]
+  );
 });
 
-client.on(Events.GuildUpdate, (oldGuild, newGuild) => {
-  sendLog(newGuild, "serverUpdated", `Server updated: ${oldGuild.name} → ${newGuild.name}.`);
+// 14. Server updated
+client.on(Events.GuildUpdate, async (oldGuild, newGuild) => {
+  const audit = await findAuditActor(
+    newGuild,
+    AuditLogEvent.GuildUpdate,
+    newGuild.id
+  );
+
+  sendLog(
+    newGuild,
+    "serverUpdated",
+    `Server settings updated.`,
+    audit?.executor || null,
+    `${newGuild.name}\nID: ${newGuild.id}`,
+    [
+      {
+        name: "Before",
+        value: `Name: ${oldGuild.name}`
+      },
+      {
+        name: "After",
+        value: `Name: ${newGuild.name}`
+      }
+    ]
+  );
 });
 
-client.on(Events.GuildBanAdd, ban => {
-  sendLog(ban.guild, "memberBanned", `${ban.user.tag} was banned.`);
+// 15. Member banned
+client.on(Events.GuildBanAdd, async ban => {
+  const audit = await findAuditActor(
+    ban.guild,
+    AuditLogEvent.MemberBanAdd,
+    ban.user.id
+  );
+
+  sendLog(
+    ban.guild,
+    "memberBanned",
+    `${ban.user.tag} was banned.`,
+    audit?.executor || null,
+    userLabel(ban.user)
+  );
 });
 
 client.login(TOKEN).catch(error => {
