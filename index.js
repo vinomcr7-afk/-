@@ -49,7 +49,6 @@ const client = new Client({
   ]
 });
 
-// All 16 log types
 const LOG_TYPES = {
   deletedMessages: "Deleted Messages",
   editedMessages: "Edited Messages",
@@ -71,7 +70,6 @@ const LOG_TYPES = {
 
 const TYPE_NAMES = Object.keys(LOG_TYPES);
 
-// Load saved configuration
 function loadConfig() {
   try {
     if (fs.existsSync(CONFIG_FILE)) {
@@ -105,17 +103,23 @@ function ensureGuildConfig(guildId) {
   saveConfig();
 }
 
-// Get a readable user label
 function userLabel(user) {
   if (!user) return "Unknown";
 
-  return [
-    user.tag || user.username || "Unknown",
-    `ID: ${user.id}`
-  ].join("\n");
+  return `${user.tag || user.username || "Unknown"}\nID: ${user.id}`;
 }
 
-// Send a log embed, including actor avatar and ID when available
+function getAvatarURL(user) {
+  if (!user || typeof user.displayAvatarURL !== "function") {
+    return null;
+  }
+
+  return user.displayAvatarURL({
+    size: 256,
+    extension: "png"
+  });
+}
+
 async function sendLog(
   guild,
   type,
@@ -142,12 +146,17 @@ async function sendLog(
     const embed = new EmbedBuilder()
       .setColor(0x8b0000)
       .setTitle(`PW VENOM LOG • ${LOG_TYPES[type] || type}`)
-      .setDescription(String(description || "No details available").slice(0, 4000))
-      .setFooter({ text: `Server: ${guild.name} • ID: ${guild.id}` })
+      .setDescription(
+        String(description || "No details available").slice(0, 4000)
+      )
+      .setFooter({
+        text: `Server: ${guild.name} • ID: ${guild.id}`
+      })
       .setTimestamp();
 
     if (actor) {
       const actorUser = actor.user || actor;
+      const avatarURL = getAvatarURL(actorUser);
 
       embed.addFields({
         name: "Actor",
@@ -155,10 +164,13 @@ async function sendLog(
         inline: true
       });
 
-      if (actorUser.displayAvatarURL) {
-        embed.setThumbnail(
-          actorUser.displayAvatarURL({ size: 256 })
-        );
+      if (avatarURL) {
+        embed.setAuthor({
+          name: actorUser.tag || actorUser.username || "Unknown",
+          iconURL: avatarURL
+        });
+
+        embed.setThumbnail(avatarURL);
       }
     } else {
       embed.addFields({
@@ -190,7 +202,6 @@ async function sendLog(
   }
 }
 
-// Find the actor in Discord Audit Log
 async function findAuditActor(guild, auditType, targetId = null) {
   try {
     const logs = await guild.fetchAuditLogs({
@@ -215,7 +226,7 @@ async function findAuditActor(guild, auditType, targetId = null) {
   }
 }
 
-// API server for the web dashboard
+// Dashboard API
 const app = express();
 
 app.use(express.json({ limit: "20kb" }));
@@ -251,7 +262,9 @@ app.get(
     const { guildId } = req.params;
 
     if (!/^\d{17,20}$/.test(guildId)) {
-      return res.status(400).json({ error: "Invalid guild ID" });
+      return res.status(400).json({
+        error: "Invalid guild ID"
+      });
     }
 
     if (!client.guilds.cache.has(guildId)) {
@@ -265,13 +278,9 @@ app.get(
     const settings = config[guildId];
 
     const channelId =
-      Object.values(settings).find(
-        entry => entry.channelId
-      )?.channelId || "";
+      Object.values(settings).find(entry => entry.channelId)?.channelId || "";
 
-    const events = TYPE_NAMES.filter(
-      type => settings[type].enabled
-    );
+    const events = TYPE_NAMES.filter(type => settings[type].enabled);
 
     res.json({
       channelId,
@@ -308,8 +317,7 @@ app.put(
         typeof channelId !== "string" ||
         !Array.isArray(events) ||
         !events.every(
-          type => typeof type === "string" &&
-            TYPE_NAMES.includes(type)
+          type => typeof type === "string" && TYPE_NAMES.includes(type)
         )
       ) {
         return res.status(400).json({
@@ -328,7 +336,9 @@ app.put(
       }
 
       const botMember = guild.members.me;
-      const permissions = channel.permissionsFor(botMember);
+      const permissions = botMember
+        ? channel.permissionsFor(botMember)
+        : null;
 
       if (
         !permissions ||
@@ -376,9 +386,7 @@ app.listen(PORT, "0.0.0.0", () => {
 const setupCommand = new SlashCommandBuilder()
   .setName("setup-logs")
   .setDescription("Configure PW VENOM LOG")
-  .setDefaultMemberPermissions(
-    PermissionFlagsBits.Administrator
-  );
+  .setDefaultMemberPermissions(PermissionFlagsBits.Administrator);
 
 client.once(Events.ClientReady, async readyClient => {
   console.log(`PW VENOM LOG online as ${readyClient.user.tag}`);
@@ -397,7 +405,7 @@ client.once(Events.ClientReady, async readyClient => {
   }
 });
 
-// Interactive setup menu
+// Setup menu
 client.on(Events.InteractionCreate, async interaction => {
   try {
     if (
@@ -540,16 +548,12 @@ client.on(Events.MessageDelete, async message => {
     message.author?.id
   );
 
-  const actor = audit?.executor || null;
-
   await sendLog(
     message.guild,
     "deletedMessages",
     `Message deleted in <#${message.channelId}>.`,
-    actor,
-    message.author
-      ? userLabel(message.author)
-      : "Message author unavailable",
+    audit?.executor || null,
+    message.author ? userLabel(message.author) : "Message author unavailable",
     [
       {
         name: "Deleted Content",
@@ -563,7 +567,7 @@ client.on(Events.MessageDelete, async message => {
   );
 });
 
-// 2. Edited messages: before and after
+// 2. Edited messages
 client.on(Events.MessageUpdate, async (oldMessage, newMessage) => {
   if (!newMessage.guild) return;
 
@@ -590,14 +594,8 @@ client.on(Events.MessageUpdate, async (oldMessage, newMessage) => {
       newMessage.author,
       userLabel(newMessage.author),
       [
-        {
-          name: "Before",
-          value: before
-        },
-        {
-          name: "After",
-          value: after
-        },
+        { name: "Before", value: before },
+        { name: "After", value: after },
         {
           name: "Message Link",
           value: `https://discord.com/channels/${newMessage.guild.id}/${newMessage.channelId}/${newMessage.id}`
@@ -631,14 +629,14 @@ client.on(Events.GuildMemberRemove, member => {
   );
 });
 
-// 5, 6, 16. Voice join, leave, mute
+// 5, 6, 16. Voice join, leave, and server mute
 client.on(Events.VoiceStateUpdate, async (oldState, newState) => {
   const member = newState.member || oldState.member;
 
   if (!member || member.user.bot) return;
 
   if (!oldState.channelId && newState.channelId) {
-    sendLog(
+    await sendLog(
       member.guild,
       "voiceJoin",
       `${member.user.tag} joined <#${newState.channelId}>.`,
@@ -648,7 +646,7 @@ client.on(Events.VoiceStateUpdate, async (oldState, newState) => {
   }
 
   if (oldState.channelId && !newState.channelId) {
-    sendLog(
+    await sendLog(
       member.guild,
       "voiceLeave",
       `${member.user.tag} left <#${oldState.channelId}>.`,
@@ -664,7 +662,7 @@ client.on(Events.VoiceStateUpdate, async (oldState, newState) => {
       member.id
     );
 
-    sendLog(
+    await sendLog(
       member.guild,
       "voiceMuted",
       `${member.user.tag} server mute changed to ${newState.serverMute}.`,
@@ -680,7 +678,7 @@ client.on(Events.VoiceStateUpdate, async (oldState, newState) => {
   }
 });
 
-// 7, 8, 13. Role changes and nickname changes
+// 7, 8, 13. Role and nickname changes
 client.on(Events.GuildMemberUpdate, async (oldMember, newMember) => {
   const oldRoles = new Set(oldMember.roles.cache.keys());
   const newRoles = new Set(newMember.roles.cache.keys());
@@ -703,7 +701,10 @@ client.on(Events.GuildMemberUpdate, async (oldMember, newMember) => {
           audit?.executor || null,
           userLabel(newMember.user),
           [
-            { name: "Role", value: `${role.name}\nID: ${role.id}` }
+            {
+              name: "Role",
+              value: `${role.name}\nID: ${role.id}`
+            }
           ]
         );
       }
@@ -728,7 +729,10 @@ client.on(Events.GuildMemberUpdate, async (oldMember, newMember) => {
           audit?.executor || null,
           userLabel(oldMember.user),
           [
-            { name: "Role", value: `${role.name}\nID: ${role.id}` }
+            {
+              name: "Role",
+              value: `${role.name}\nID: ${role.id}`
+            }
           ]
         );
       }
@@ -772,7 +776,7 @@ client.on(Events.ChannelCreate, async channel => {
     channel.id
   );
 
-  sendLog(
+  await sendLog(
     channel.guild,
     "channelCreated",
     `Channel created: ${channel.name}.`,
@@ -791,7 +795,7 @@ client.on(Events.ChannelDelete, async channel => {
     channel.id
   );
 
-  sendLog(
+  await sendLog(
     channel.guild,
     "channelDeleted",
     `Channel deleted: ${channel.name}.`,
@@ -810,7 +814,7 @@ client.on(Events.ChannelUpdate, async (oldChannel, newChannel) => {
     newChannel.id
   );
 
-  sendLog(
+  await sendLog(
     newChannel.guild,
     "channelUpdated",
     `Channel updated: ${oldChannel.name} → ${newChannel.name}.`,
@@ -837,7 +841,7 @@ client.on(Events.RoleUpdate, async (oldRole, newRole) => {
     newRole.id
   );
 
-  sendLog(
+  await sendLog(
     newRole.guild,
     "roleUpdated",
     `Role updated: ${oldRole.name} → ${newRole.name}.`,
@@ -864,10 +868,10 @@ client.on(Events.GuildUpdate, async (oldGuild, newGuild) => {
     newGuild.id
   );
 
-  sendLog(
+  await sendLog(
     newGuild,
     "serverUpdated",
-    `Server settings updated.`,
+    "Server settings updated.",
     audit?.executor || null,
     `${newGuild.name}\nID: ${newGuild.id}`,
     [
@@ -891,7 +895,7 @@ client.on(Events.GuildBanAdd, async ban => {
     ban.user.id
   );
 
-  sendLog(
+  await sendLog(
     ban.guild,
     "memberBanned",
     `${ban.user.tag} was banned.`,
